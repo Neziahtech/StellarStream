@@ -1,7 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
-import { timingSafeEqual, createHash } from 'crypto';
-
-const API_KEY = process.env.API_KEY;
+import { createHash } from 'crypto';
+import { prisma } from '../lib/db.js';
 
 function getApiKeyFromRequest(req: Request): string | null {
   const authHeader = req.headers.authorization;
@@ -15,36 +14,46 @@ function getApiKeyFromRequest(req: Request): string | null {
   return null;
 }
 
-/**
- * Constant-time comparison of two strings.
- * If expected is empty (API_KEY not set), returns false.
- */
-function secureCompare(actual: string, expected: string): boolean {
-  if (!expected || expected.length === 0) return false;
-  if (actual.length !== expected.length) return false;
-  try {
-    return timingSafeEqual(Buffer.from(actual, 'utf8'), Buffer.from(expected, 'utf8'));
-  } catch {
-    return false;
-  }
+function hashKey(raw: string): string {
+  return createHash('sha256').update(raw).digest('hex');
 }
 
 /**
- * Sets req.authenticated based on API_KEY header.
- * Does not block unauthenticated requests; rate limiter uses this for tier selection.
+ * Validates x-api-key (or Bearer token) against the ApiKey table.
+ * Sets req.authenticated, req.authenticatedKeyId, and req.apiKeyRateLimit.
+ * Does not block unauthenticated requests — rate limiter handles tiering.
  */
-export function authMiddleware(req: Request, _res: Response, next: NextFunction): void {
+export async function authMiddleware(req: Request, _res: Response, next: NextFunction): Promise<void> {
   req.authenticated = false;
-  if (!API_KEY) {
+
+  const raw = getApiKeyFromRequest(req);
+  if (!raw) {
     next();
     return;
   }
-  const provided = getApiKeyFromRequest(req);
-  if (provided !== null && secureCompare(provided, API_KEY)) {
-    req.authenticated = true;
-    req.authenticatedKeyId = createHash('sha256')
-      .update(provided)
-      .digest('hex');
+
+  const keyHash = hashKey(raw);
+
+  try {
+    const apiKey = await prisma.apiKey.findUnique({
+      where: { keyHash },
+      select: { id: true, isActive: true, rateLimit: true },
+    });
+
+    if (apiKey?.isActive) {
+      req.authenticated = true;
+      req.authenticatedKeyId = apiKey.id;
+      req.apiKeyRateLimit = apiKey.rateLimit;
+
+      // Fire-and-forget: update lastUsedAt without blocking the request
+      prisma.apiKey.update({
+        where: { id: apiKey.id },
+        data: { lastUsedAt: new Date() },
+      }).catch(() => { /* non-critical */ });
+    }
+  } catch {
+    // DB error: fail open (don't block traffic), treat as unauthenticated
   }
+
   next();
 }

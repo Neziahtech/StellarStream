@@ -4,8 +4,10 @@ declare global {
   namespace Express {
     interface Request {
       authenticated?: boolean;
-      /** Set when authenticated; used by rate limiter for keying (hash of API key). */
+      /** Set when authenticated; the ApiKey.id from the database. */
       authenticatedKeyId?: string;
+      /** Per-key rate limit (requests/min) from the ApiKey table. */
+      apiKeyRateLimit?: number;
       /** Set by requireWalletAuth after successful signature verification (Stellar G... address). */
       walletAddress?: string;
       /** Set by requireWalletAuth when request is authenticated via wallet signature. */

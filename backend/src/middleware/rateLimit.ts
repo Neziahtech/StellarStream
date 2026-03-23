@@ -4,8 +4,8 @@ import { redis } from '../lib/redis.js';
 
 const PUBLIC_POINTS = 100;
 const PUBLIC_DURATION_SEC = 60;
-const AUTH_POINTS = 500;
-const AUTH_DURATION_SEC = 60;
+const DEFAULT_PARTNER_POINTS = 1000;
+const PARTNER_DURATION_SEC = 60;
 
 const publicLimiter = new RateLimiterRedis({
   storeClient: redis,
@@ -14,12 +14,24 @@ const publicLimiter = new RateLimiterRedis({
   duration: PUBLIC_DURATION_SEC,
 });
 
-const authLimiter = new RateLimiterRedis({
+// Default partner limiter — used when no per-key override is needed
+const defaultPartnerLimiter = new RateLimiterRedis({
   storeClient: redis,
-  keyPrefix: 'rl:auth',
-  points: AUTH_POINTS,
-  duration: AUTH_DURATION_SEC,
+  keyPrefix: 'rl:partner',
+  points: DEFAULT_PARTNER_POINTS,
+  duration: PARTNER_DURATION_SEC,
 });
+
+/** Returns a per-key limiter when the key has a custom rateLimit value. */
+function getPartnerLimiter(keyId: string, points: number): RateLimiterRedis {
+  if (points === DEFAULT_PARTNER_POINTS) return defaultPartnerLimiter;
+  return new RateLimiterRedis({
+    storeClient: redis,
+    keyPrefix: `rl:partner:${points}`,
+    points,
+    duration: PARTNER_DURATION_SEC,
+  });
+}
 
 function getRateLimitKey(req: Request): string {
   if (req.authenticated && req.authenticatedKeyId) {
@@ -29,18 +41,24 @@ function getRateLimitKey(req: Request): string {
 }
 
 /**
- * Tiered rate limit: 100/min public, 500/min authenticated.
- * Apply only to /stats and /search. Fail-closed on Redis errors (503).
+ * Tiered rate limit:
+ *   - Public (unauthenticated): 100 req/min by IP
+ *   - Partner (authenticated API key): per-key rateLimit from DB (default 1000 req/min)
  */
 export function rateLimitMiddleware(req: Request, res: Response, next: NextFunction): void {
   const key = getRateLimitKey(req);
-  const limiter = req.authenticated ? authLimiter : publicLimiter;
+
+  let limiter: RateLimiterRedis;
+  if (req.authenticated && req.authenticatedKeyId) {
+    const points = req.apiKeyRateLimit ?? DEFAULT_PARTNER_POINTS;
+    limiter = getPartnerLimiter(req.authenticatedKeyId, points);
+  } else {
+    limiter = publicLimiter;
+  }
 
   limiter
     .consume(key)
-    .then(() => {
-      next();
-    })
+    .then(() => next())
     .catch((rejRes) => {
       if (rejRes instanceof Error) {
         res.status(503).json({
