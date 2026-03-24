@@ -30,6 +30,10 @@ pub const STREAM_COUNT_V2: Symbol = symbol_short!("STR_V2");
 const INSTANCE_TTL_THRESHOLD: u32 = 518_400; // ~30 days
 const INSTANCE_TTL_BUMP: u32 = 535_680; // ~31 days
 
+// Per-stream persistent TTL constants
+pub const STREAM_TTL_THRESHOLD: u32 = 518_400; // ~30 days — extend if below this
+pub const STREAM_TTL_BUMP: u32 = 2_073_600; // ~120 days — extend to this
+
 // ----------------------------------------------------------------
 // instance() helpers — Admin
 // ----------------------------------------------------------------
@@ -55,7 +59,7 @@ pub fn has_admin(env: &Env) -> bool {
 }
 
 // ----------------------------------------------------------------
-// instance() helpers — Streams
+// persistent() helpers — Streams
 // ----------------------------------------------------------------
 
 /// Allocate the next stream ID and increment the counter.
@@ -65,18 +69,25 @@ pub fn next_stream_id(env: &Env) -> u64 {
     id
 }
 
-/// Persist a V2 stream.
+/// Persist a V2 stream in persistent storage and set its initial TTL.
 pub fn set_stream(env: &Env, stream_id: u64, stream: &StreamV2) {
+    let key = DataKeyV2::Stream(stream_id);
+    env.storage().persistent().set(&key, stream);
     env.storage()
-        .instance()
-        .set(&DataKeyV2::Stream(stream_id), stream);
-    bump_instance(env);
+        .persistent()
+        .extend_ttl(&key, STREAM_TTL_THRESHOLD, STREAM_TTL_BUMP);
 }
 
-/// Read a V2 stream. Returns None if it does not exist.
+/// Read a V2 stream from persistent storage.
 pub fn get_stream(env: &Env, stream_id: u64) -> Option<StreamV2> {
-    bump_instance(env);
-    env.storage().instance().get(&DataKeyV2::Stream(stream_id))
+    let key = DataKeyV2::Stream(stream_id);
+    let stream: Option<StreamV2> = env.storage().persistent().get(&key);
+    if stream.is_some() {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, STREAM_TTL_THRESHOLD, STREAM_TTL_BUMP);
+    }
+    stream
 }
 
 // ----------------------------------------------------------------
@@ -88,4 +99,21 @@ pub fn bump_instance(env: &Env) {
     env.storage()
         .instance()
         .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_BUMP);
+}
+
+/// Extend persistent TTL for each stream ID in `ids`.
+/// Skips IDs that no longer exist in storage.
+/// Returns the count of streams whose TTL was extended.
+pub fn bump_streams_ttl(env: &Env, ids: &soroban_sdk::Vec<u64>) -> u32 {
+    let mut count: u32 = 0;
+    for id in ids.iter() {
+        let key = DataKeyV2::Stream(id);
+        if env.storage().persistent().has(&key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, STREAM_TTL_THRESHOLD, STREAM_TTL_BUMP);
+            count += 1;
+        }
+    }
+    count
 }

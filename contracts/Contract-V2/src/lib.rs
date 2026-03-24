@@ -1,7 +1,7 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
 use soroban_sdk::xdr::ToXdr;
-use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env};
+use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Vec};
 
 mod errors;
 mod storage;
@@ -119,6 +119,22 @@ impl Contract {
 
     pub fn get_stream(env: Env, stream_id: u64) -> Option<StreamV2> {
         storage::get_stream(&env, stream_id)
+    }
+
+    // ----------------------------------------------------------------
+    // Issue #404 — Bulk TTL Extension
+    // ----------------------------------------------------------------
+
+    /// Extend persistent storage TTL for each stream ID in `ids`.
+    ///
+    /// Public and permissionless — anyone (altruistic keeper, incentivised
+    /// bot, or the stream participants themselves) can call this to prevent
+    /// active streams from expiring due to storage rent.
+    ///
+    /// Returns the number of streams whose TTL was actually extended
+    /// (IDs that no longer exist are silently skipped).
+    pub fn bump_active_streams_ttl(env: Env, ids: Vec<u64>) -> u32 {
+        storage::bump_streams_ttl(&env, &ids)
     }
 
     // ----------------------------------------------------------------

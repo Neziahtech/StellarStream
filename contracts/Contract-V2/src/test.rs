@@ -392,3 +392,55 @@ fn test_permit_stream_fails_if_deadline_passed() {
     );
     assert!(result.is_err());
 }
+
+// ── Issue #404 — Bulk TTL tests ───────────────────────────────────────────────
+
+#[test]
+fn test_bump_active_streams_ttl_returns_count_of_existing() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 100);
+
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let receiver = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let (token_id, token_client) = create_token(&env, &token_admin);
+    let (v2_id, v2_client) = setup_v2(&env, &admin);
+
+    // Mint and approve tokens so migrate_stream can pull them
+    let v1_id = {
+        let id = env.register(mock_v1::MockV1, ());
+        let mock = mock_v1::MockV1Client::new(&env, &id);
+        mock.seed_stream(&make_v1_stream(&env, &sender, &receiver, &token_id));
+        id
+    };
+
+    // Create two streams via migration
+    let sid0 = v2_client.migrate_stream(&v1_id, &0u64, &receiver);
+    // Re-seed for second migration
+    {
+        let mock = mock_v1::MockV1Client::new(&env, &v1_id);
+        mock.seed_stream(&make_v1_stream(&env, &sender, &receiver, &token_id));
+    }
+    let sid1 = v2_client.migrate_stream(&v1_id, &0u64, &receiver);
+
+    // Bump TTL for both existing + one non-existent ID
+    let ids = soroban_sdk::vec![&env, sid0, sid1, 999u64];
+    let extended = v2_client.bump_active_streams_ttl(&ids);
+
+    assert_eq!(extended, 2u32); // 999 is skipped
+}
+
+#[test]
+fn test_bump_active_streams_ttl_skips_nonexistent() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let (_, v2_client) = setup_v2(&env, &admin);
+
+    let ids = soroban_sdk::vec![&env, 42u64, 100u64, 999u64];
+    let extended = v2_client.bump_active_streams_ttl(&ids);
+
+    assert_eq!(extended, 0u32);
+}
