@@ -1,11 +1,9 @@
+use crate::errors::ContractError;
 use crate::types::StreamV2;
-use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol};
+use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol, Vec};
 
 // ----------------------------------------------------------------
 // DataKeyV2 — all storage keys for the V2 contract.
-//
-// Named DataKeyV2 (not DataKey) so it cannot collide with any
-// V1 DataKey that may exist in the same workspace.
 //
 // IMPORTANT: never reorder or remove variants — Soroban
 // serialises the enum discriminant as the on-chain key.
@@ -15,8 +13,12 @@ use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol};
 #[derive(Clone, Debug, PartialEq)]
 pub enum DataKeyV2 {
     // -- instance() keys -----------------------------------------
-    Admin, // global admin/governance address
+    Admin,       // kept for discriminant stability (no longer written)
+    Stream(u64), // individual stream record
 
+    // Issue #400 — multi-sig admin
+    AdminList, // Vec<Address> — the current signer set
+    Threshold, // u32          — minimum approvals required
     // -- Stream storage ------------------------------------------
     /// Individual stream record, keyed by stream ID.
     Stream(u64),
@@ -28,8 +30,7 @@ pub enum DataKeyV2 {
     UserSeen(Address),
 }
 
-/// Global stream counter — stored under a short Symbol to match
-/// the V1 pattern and stay cheap on storage.
+/// Global stream counter.
 pub const STREAM_COUNT_V2: Symbol = symbol_short!("STR_V2");
 pub const V2_TVL: Symbol = symbol_short!("V2_TVL");
 pub const V2_USER_COUNT: Symbol = symbol_short!("V2_USER");
@@ -39,41 +40,102 @@ const INSTANCE_TTL_THRESHOLD: u32 = 518_400; // ~30 days
 const INSTANCE_TTL_BUMP: u32 = 535_680; // ~31 days
 
 // ----------------------------------------------------------------
-// instance() helpers — Admin
+// Backward-compat single-admin bootstrap (used by init)
 // ----------------------------------------------------------------
 
-/// Store the admin address. Call once inside your init().
+/// Seed a single-admin list with threshold = 1.
 pub fn set_admin(env: &Env, admin: &Address) {
-    env.storage().instance().set(&DataKeyV2::Admin, admin);
+    let mut list = Vec::new(env);
+    list.push_back(admin.clone());
+    set_admin_list_raw(env, &list, 1);
+}
+
+/// Return the first admin (legacy helper used by existing callers).
+pub fn get_admin(env: &Env) -> Address {
+    bump_instance(env);
+    get_admin_list(env)
+        .first()
+        .expect("V2: AdminList not set")
+}
+
+/// Returns true if the admin list has been initialised.
+pub fn has_admin(env: &Env) -> bool {
+    env.storage().instance().has(&DataKeyV2::AdminList)
+}
+
+// ----------------------------------------------------------------
+// Multi-sig admin storage (Issue #400)
+// ----------------------------------------------------------------
+
+/// Atomically replace the admin set and threshold.
+/// Validation (threshold bounds) is enforced in lib.rs.
+pub fn set_admin_list_raw(env: &Env, admins: &Vec<Address>, threshold: u32) {
+    env.storage()
+        .instance()
+        .set(&DataKeyV2::AdminList, admins);
+    env.storage()
+        .instance()
+        .set(&DataKeyV2::Threshold, &threshold);
     bump_instance(env);
 }
 
-/// Read the admin address. Panics if init() has not been called.
-pub fn get_admin(env: &Env) -> Address {
+/// Return the full admin list.
+pub fn get_admin_list(env: &Env) -> Vec<Address> {
     bump_instance(env);
     env.storage()
         .instance()
-        .get(&DataKeyV2::Admin)
-        .expect("V2: Admin not set")
+        .get(&DataKeyV2::AdminList)
+        .expect("V2: AdminList not set")
 }
 
-/// Returns true if an admin has been stored.
-pub fn has_admin(env: &Env) -> bool {
-    env.storage().instance().has(&DataKeyV2::Admin)
+/// Return the approval threshold.
+pub fn get_threshold(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKeyV2::Threshold)
+        .unwrap_or(1)
+}
+
+/// Require that at least `threshold` of the admin list have authorised
+/// this invocation.
+///
+/// Callers pass `signers` — the subset of admins that are signing this
+/// particular transaction. The function:
+///   1. Verifies every address in `signers` is in the admin list.
+///   2. Calls `require_auth()` on each (host enforces the auth entry).
+///   3. Checks `signers.len() >= threshold`.
+pub fn require_multisig(
+    env: &Env,
+    signers: &Vec<Address>,
+) -> Result<(), ContractError> {
+    let admins = get_admin_list(env);
+    let threshold = get_threshold(env);
+
+    // Every supplied signer must be a registered admin.
+    for signer in signers.iter() {
+        if !admins.contains(&signer) {
+            return Err(ContractError::NotEnoughSigners);
+        }
+        signer.require_auth();
+    }
+
+    if signers.len() < threshold {
+        return Err(ContractError::NotEnoughSigners);
+    }
+
+    Ok(())
 }
 
 // ----------------------------------------------------------------
-// instance() helpers — Streams
+// Stream storage
 // ----------------------------------------------------------------
 
-/// Allocate the next stream ID and increment the counter.
 pub fn next_stream_id(env: &Env) -> u64 {
     let id: u64 = env.storage().instance().get(&STREAM_COUNT_V2).unwrap_or(0);
     env.storage().instance().set(&STREAM_COUNT_V2, &(id + 1));
     id
 }
 
-/// Persist a V2 stream.
 pub fn set_stream(env: &Env, stream_id: u64, stream: &StreamV2) {
     env.storage()
         .instance()
@@ -81,7 +143,6 @@ pub fn set_stream(env: &Env, stream_id: u64, stream: &StreamV2) {
     bump_instance(env);
 }
 
-/// Read a V2 stream. Returns None if it does not exist.
 pub fn get_stream(env: &Env, stream_id: u64) -> Option<StreamV2> {
     bump_instance(env);
     env.storage().instance().get(&DataKeyV2::Stream(stream_id))
@@ -127,7 +188,6 @@ pub fn get_health(env: &Env) -> crate::types::ProtocolHealthV2 {
 // TTL
 // ----------------------------------------------------------------
 
-/// Extend instance storage TTL if it has dropped below the threshold.
 pub fn bump_instance(env: &Env) {
     env.storage()
         .instance()

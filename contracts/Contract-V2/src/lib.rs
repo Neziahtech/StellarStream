@@ -1,7 +1,7 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
 use soroban_sdk::xdr::ToXdr;
-use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env};
+use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Vec};
 
 mod errors;
 mod storage;
@@ -34,6 +34,39 @@ impl Contract {
     }
 
     // ----------------------------------------------------------------
+    // Issue #400 — Multi-sig Admin Handover
+    // ----------------------------------------------------------------
+
+    /// Replace the admin set and threshold.
+    ///
+    /// `signers` must contain at least the current threshold of existing
+    /// admins so the handover itself is multi-sig protected.
+    pub fn set_admins(
+        env: Env,
+        signers: Vec<Address>, // current admins authorising this change
+        new_admins: Vec<Address>,
+        new_threshold: u32,
+    ) -> Result<(), ContractError> {
+        // Validate new config before touching state.
+        if new_threshold == 0 || new_threshold > new_admins.len() {
+            return Err(ContractError::InvalidThreshold);
+        }
+
+        // Require current multi-sig quorum.
+        storage::require_multisig(&env, &signers)?;
+
+        storage::set_admin_list_raw(&env, &new_admins, new_threshold);
+        Ok(())
+    }
+
+    /// Return the current admin list.
+    pub fn get_admins(env: Env) -> Vec<Address> {
+        storage::get_admin_list(&env)
+    }
+
+    /// Return the current approval threshold.
+    pub fn get_threshold(env: Env) -> u32 {
+        storage::get_threshold(&env)
     // Issue #396 — Dust Threshold
     // ----------------------------------------------------------------
 

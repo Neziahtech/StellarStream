@@ -393,6 +393,122 @@ fn test_permit_stream_fails_if_deadline_passed() {
     assert!(result.is_err());
 }
 
+// ── Issue #400 — Multi-sig admin tests ───────────────────────────────────────
+
+#[test]
+fn test_init_creates_single_admin_with_threshold_one() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let (_, client) = setup_v2(&env, &admin);
+
+    assert_eq!(client.get_threshold(), 1u32);
+    assert_eq!(client.get_admins().len(), 1u32);
+    assert_eq!(client.get_admins().first().unwrap(), admin);
+}
+
+#[test]
+fn test_set_admins_replaces_list_and_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let (_, client) = setup_v2(&env, &admin);
+
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    let a3 = Address::generate(&env);
+    let new_admins = soroban_sdk::vec![&env, a1.clone(), a2.clone(), a3.clone()];
+    let signers = soroban_sdk::vec![&env, admin.clone()]; // current quorum = 1
+
+    client.set_admins(&signers, &new_admins, &2u32);
+
+    assert_eq!(client.get_threshold(), 2u32);
+    assert_eq!(client.get_admins().len(), 3u32);
+}
+
+#[test]
+fn test_set_admins_rejects_threshold_zero() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let (_, client) = setup_v2(&env, &admin);
+
+    let new_admins = soroban_sdk::vec![&env, Address::generate(&env)];
+    let signers = soroban_sdk::vec![&env, admin.clone()];
+
+    let result = client.try_set_admins(&signers, &new_admins, &0u32);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_set_admins_rejects_threshold_exceeding_list_size() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let (_, client) = setup_v2(&env, &admin);
+
+    let new_admins = soroban_sdk::vec![&env, Address::generate(&env), Address::generate(&env)];
+    let signers = soroban_sdk::vec![&env, admin.clone()];
+
+    // threshold = 3 but only 2 admins
+    let result = client.try_set_admins(&signers, &new_admins, &3u32);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_set_admins_rejects_non_admin_signer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let (_, client) = setup_v2(&env, &admin);
+
+    let stranger = Address::generate(&env);
+    let new_admins = soroban_sdk::vec![&env, Address::generate(&env)];
+    let signers = soroban_sdk::vec![&env, stranger]; // not in admin list
+
+    let result = client.try_set_admins(&signers, &new_admins, &1u32);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_set_admins_requires_quorum() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let (_, client) = setup_v2(&env, &admin);
+
+    // Promote to 2-of-3
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    let a3 = Address::generate(&env);
+    let three = soroban_sdk::vec![&env, a1.clone(), a2.clone(), a3.clone()];
+    client.set_admins(&soroban_sdk::vec![&env, admin.clone()], &three, &2u32);
+
+    // Try to change again with only 1 signer — below threshold of 2
+    let new_admins = soroban_sdk::vec![&env, Address::generate(&env)];
+    let only_one = soroban_sdk::vec![&env, a1.clone()];
+    let result = client.try_set_admins(&only_one, &new_admins, &1u32);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_set_admins_succeeds_with_exact_quorum() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let (_, client) = setup_v2(&env, &admin);
+
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    let a3 = Address::generate(&env);
+    let three = soroban_sdk::vec![&env, a1.clone(), a2.clone(), a3.clone()];
+    client.set_admins(&soroban_sdk::vec![&env, admin.clone()], &three, &2u32);
+
+    // Change with exactly 2 signers — meets threshold
+    let new_admins = soroban_sdk::vec![&env, Address::generate(&env)];
+    let two = soroban_sdk::vec![&env, a1.clone(), a2.clone()];
+    let result = client.try_set_admins(&two, &new_admins, &1u32);
+    assert!(result.is_ok());
 // ── Issue #396 — Dust threshold tests ────────────────────────────────────────
 
 #[test]
