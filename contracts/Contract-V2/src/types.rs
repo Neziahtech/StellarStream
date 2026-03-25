@@ -5,6 +5,7 @@ use soroban_sdk::{contracttype, Address, BytesN, Vec};
 pub struct StreamV2 {
     pub sender: Address,
     pub receiver: Address,
+    pub beneficiary: Address,
     pub token: Address,
     pub total_amount: i128,
     pub start_time: u64,
@@ -174,14 +175,37 @@ pub struct ProtocolHealthV2 {
     pub total_v2_streams: u64,
 }
 
+// ----------------------------------------------------------------
+// Time-locked operations
+// ----------------------------------------------------------------
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum Operation {
+    SetAdmins(Vec<Address>, u32),
+    TransferAdmin(Address),
+    SetMinValue(Address, i128),
+}
+
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct StreamToppedUpEvent {
+pub struct OperationScheduledEvent {
+    pub op: Operation,
+    pub execution_time: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct OperationExecutedEvent {
+    pub op: Operation,
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BeneficiaryTransferredV2Event {
     pub stream_id: u64,
-    pub sender: Address,
-    pub extra_amount: i128,
-    pub new_total_amount: i128,
-    pub new_end_time: u64,
+    pub previous_beneficiary: Address,
+    pub new_beneficiary: Address,
     pub timestamp: u64,
 }
 

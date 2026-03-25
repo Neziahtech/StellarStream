@@ -25,4 +25,5 @@ pub enum Error {
     AdminListNotSet = 21,
     NotExecutionTime = 22,
     OpNotScheduled = 23,
+    NotBeneficiary = 24,
 }

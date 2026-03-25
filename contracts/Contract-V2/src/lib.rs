@@ -12,6 +12,7 @@ use contracterror::Error;
 pub use types::{
     AdminTransferredEvent, BatchStreamsCreatedEvent, ContractPausedEvent, ContractUnpausedEvent, MigrationEvent, PermitArgs, PermitStreamCreatedEvent, StreamArgs,
     StreamCancelledV2Event, StreamClaimV2Event, StreamCreatedV2Event, StreamMigratedEvent,
+    StreamV2, Operation, OperationScheduledEvent, OperationExecutedEvent, BeneficiaryTransferredV2Event,
     StreamV2, Operation, OperationScheduledEvent, OperationExecutedEvent,
 };
 use v1_interface::Client as V1Client;
@@ -174,6 +175,7 @@ impl Contract {
         let v2_stream = StreamV2 {
             sender: v1_stream.sender.clone(),
             receiver: caller.clone(),
+            beneficiary: caller.clone(),
             token: v1_stream.token.clone(),
             total_amount: remaining,
             start_time: now,
@@ -222,13 +224,16 @@ impl Contract {
     // Stream Operations (Issue #363 — Escalating Rates)
     // ----------------------------------------------------------------
 
+    pub fn withdraw(env: Env, stream_id: u64, beneficiary: Address) -> Result<i128, Error> {
     pub fn withdraw(env: Env, stream_id: u64, receiver: Address) -> Result<i128, Error> {
         Self::require_not_paused(&env)?;
-        receiver.require_auth();
+        beneficiary.require_auth();
 
         let mut stream =
             storage::get_stream(&env, stream_id).ok_or(Error::StreamNotFound)?;
 
+        if stream.beneficiary != beneficiary {
+            return Err(Error::NotBeneficiary);
         if stream.receiver != receiver {
             return Err(Error::NotStreamOwner);
         }
@@ -249,7 +254,7 @@ impl Contract {
         let token_client = soroban_sdk::token::TokenClient::new(&env, &stream.token);
         token_client.transfer(
             &env.current_contract_address(),
-            &stream.receiver,
+            &stream.beneficiary,
             &to_withdraw,
         );
 
@@ -261,10 +266,10 @@ impl Contract {
         storage::update_stats(&env, -to_withdraw, &stream.sender, &stream.receiver);
 
         env.events().publish(
-            (symbol_short!("claim"), receiver.clone()),
+            (symbol_short!("claim"), beneficiary.clone()),
             StreamClaimV2Event {
                 stream_id,
-                receiver: receiver.clone(),
+                receiver: beneficiary.clone(),
                 amount: to_withdraw,
                 total_claimed: stream.withdrawn_amount,
                 timestamp: now,
@@ -281,6 +286,8 @@ impl Contract {
         let mut stream =
             storage::get_stream(&env, stream_id).ok_or(Error::StreamNotFound)?;
 
+        if stream.sender != caller && stream.beneficiary != caller {
+            return Err(Error::NotBeneficiary);
         if stream.sender != caller && stream.receiver != caller {
             return Err(Error::NotStreamOwner);
         }
@@ -302,7 +309,7 @@ impl Contract {
         if to_receiver > 0 {
             token_client.transfer(
                 &env.current_contract_address(),
-                &stream.receiver,
+                &stream.beneficiary,
                 &to_receiver,
             );
         }
@@ -318,6 +325,36 @@ impl Contract {
                 to_receiver,
                 to_sender,
                 timestamp: now,
+            },
+        );
+
+        Ok(())
+    }
+
+    pub fn transfer_beneficiary(
+        env: Env,
+        stream_id: u64,
+        new_beneficiary: Address,
+    ) -> Result<(), Error> {
+        Self::require_not_paused(&env)?;
+
+        let mut stream =
+            storage::get_stream(&env, stream_id).ok_or(Error::StreamNotFound)?;
+
+        stream.beneficiary.require_auth();
+
+        let previous_beneficiary = stream.beneficiary.clone();
+        stream.beneficiary = new_beneficiary.clone();
+
+        storage::set_stream(&env, stream_id, &stream);
+
+        env.events().publish(
+            (symbol_short!("benefic"), stream_id),
+            BeneficiaryTransferredV2Event {
+                stream_id,
+                previous_beneficiary,
+                new_beneficiary,
+                timestamp: env.ledger().timestamp(),
             },
         );
 
@@ -520,6 +557,7 @@ impl Contract {
         let stream = StreamV2 {
             sender: args.sender.clone(),
             receiver: args.receiver.clone(),
+            beneficiary: args.receiver.clone(),
             token: args.token.clone(),
             total_amount: args.total_amount,
             start_time: args.start_time,
@@ -619,6 +657,7 @@ impl Contract {
         let stream = StreamV2 {
             sender: sender_addr.clone(),
             receiver: args.receiver.clone(),
+            beneficiary: args.receiver.clone(),
             token: args.token.clone(),
             total_amount: args.total_amount,
             start_time: args.start_time,
@@ -716,6 +755,7 @@ impl Contract {
             let stream = StreamV2 {
                 sender: args.sender.clone(),
                 receiver: args.receiver.clone(),
+                beneficiary: args.receiver.clone(),
                 token: args.token.clone(),
                 total_amount: args.total_amount,
                 start_time: args.start_time,
