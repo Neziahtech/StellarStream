@@ -2,9 +2,10 @@ import {
   Address,
   Contract,
   Networks,
-  SorobanRpc,
+  rpc as SorobanRpc,
   TransactionBuilder,
   nativeToScVal,
+  Transaction,
 } from "@stellar/stellar-sdk";
 import { signTransaction } from "@stellar/freighter-api";
 
@@ -199,7 +200,7 @@ async function invokeSignedContractTx(
     throw new Error("Wallet signature failed");
   }
 
-  const sendResult = await rpc.sendTransaction(signedXdr);
+  const sendResult = await rpc.sendTransaction(new Transaction(signedXdr, Networks.TESTNET));
   const hash = (sendResult as { hash?: string }).hash;
 
   if (!hash) {

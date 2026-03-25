@@ -5,7 +5,7 @@ use crate::types::{PermitArgs, StreamArgs};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::TokenClient,
-    Address, Env, Vec,
+    Address, Env, vec,
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -594,9 +594,14 @@ fn test_set_admins_replaces_list_and_threshold() {
     let a2 = Address::generate(&env);
     let a3 = Address::generate(&env);
     let new_admins = soroban_sdk::vec![&env, a1.clone(), a2.clone(), a3.clone()];
-    let signers = soroban_sdk::vec![&env, admin.clone()]; // current quorum = 1
+    let op = crate::types::Operation::SetAdmins(new_admins, 2);
 
-    client.set_admins(&signers, &new_admins, &2u32);
+    client.schedule_op(&op);
+    
+    // Advance time by 48 hours and 1 second
+    env.ledger().set_timestamp(48 * 60 * 60 + 1);
+    
+    client.execute_op(&op);
 
     assert_eq!(client.get_threshold(), 2u32);
     assert_eq!(client.get_admins().len(), 3u32);
@@ -880,7 +885,7 @@ fn test_create_batch_streams_success() {
     // Mint tokens to sender
     asset_client.mint(&sender, &1_000_000_000);
 
-    let (_, v2_client) = setup_v2(&env, &admin);
+    let (v2_address, v2_client) = setup_v2(&env, &admin);
 
     // Create batch of 2 streams
     let streams = soroban_sdk::vec![
@@ -933,7 +938,7 @@ fn test_create_batch_streams_success() {
 
     // Check tokens were transferred
     assert_eq!(token_client.balance(&sender), 700_000_000); // 1e9 - 3e8
-    assert_eq!(token_client.balance(&v2_client.address), 300_000_000);
+    assert_eq!(token_client.balance(&v2_address), 300_000_000);
 }
 
 #[test]
@@ -968,7 +973,7 @@ fn test_create_batch_streams_max_limit() {
     }
 
     let result = v2_client.try_create_batch_streams(&streams);
-    assert_eq!(result, Err(Ok(ContractError::BatchTooLarge)));
+    assert_eq!(result, Err(Ok(Error::BatchTooLarge)));
 }
 
 #[test]
@@ -983,7 +988,7 @@ fn test_create_batch_streams_atomic_failure() {
     let (token_id, token_client, asset_client) = create_token(&env, &token_admin);
 
     // Mint insufficient tokens
-    asset_client.mint(&sender, &200_000_000);
+    asset_client.mint(&sender, &100_000_000);
 
     let (_, v2_client) = setup_v2(&env, &admin);
 
@@ -1027,7 +1032,7 @@ fn test_create_batch_streams_atomic_failure() {
     assert!(v2_client.get_stream(&1).is_none());
 
     // Balance should be unchanged
-    assert_eq!(token_client.balance(&sender), 200_000_000);
+    assert_eq!(token_client.balance(&sender), 100_000_000);
 }
 
 // ── Governance: Stream-Weighted Voting Power tests ───────────────────────────

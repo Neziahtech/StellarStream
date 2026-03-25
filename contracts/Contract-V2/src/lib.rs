@@ -3,16 +3,17 @@
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Symbol, Vec};
 
-mod errors;
+mod contracterror;
 mod storage;
 mod types;
 mod v1_interface;
 
-use errors::ContractError;
+use contracterror::Error;
 pub use types::{
-    AdminTransferredEvent, BatchStreamsCreatedEvent, ClawbackRebalanceEvent, ContractPausedEvent, ContractUnpausedEvent, MigrationEvent, PermitArgs, PermitStreamCreatedEvent, StreamArgs,
-    StreamCancelledV2Event, StreamClaimV2Event, StreamCreatedV2Event, StreamMigratedEvent, StreamToppedUpEvent,
-    StreamV2,
+    AdminTransferredEvent, BatchStreamsCreatedEvent, BeneficiaryTransferredV2Event, ClawbackRebalanceEvent,
+    ContractPausedEvent, ContractUnpausedEvent, MigrationEvent, Operation, OperationExecutedEvent,
+    OperationScheduledEvent, PermitArgs, PermitStreamCreatedEvent, StreamArgs, StreamCancelledV2Event,
+    StreamClaimV2Event, StreamCreatedV2Event, StreamMigratedEvent, StreamToppedUpEvent, StreamV2,
 };
 use v1_interface::Client as V1Client;
 
@@ -31,9 +32,9 @@ impl Contract {
     // Init
     // ----------------------------------------------------------------
 
-    pub fn init(env: Env, admin: Address) -> Result<(), ContractError> {
+    pub fn init(env: Env, admin: Address) -> Result<(), Error> {
         if storage::has_admin(&env) {
-            return Err(ContractError::AlreadyInitialized);
+            return Err(Error::AlreadyInitialized);
         }
         storage::set_admin(&env, &admin);
         Ok(())
@@ -51,19 +52,16 @@ impl Contract {
     ///
     /// `signers` must contain at least the current threshold of existing
     /// admins so the handover itself is multi-sig protected.
-    pub fn set_admins(
+    /// Internal helper for set_admins.
+    fn set_admins_internal(
         env: Env,
-        signers: Vec<Address>, // current admins authorising this change
         new_admins: Vec<Address>,
         new_threshold: u32,
-    ) -> Result<(), ContractError> {
+    ) -> Result<(), Error> {
         // Validate new config before touching state.
         if new_threshold == 0 || new_threshold > new_admins.len() {
-            return Err(ContractError::InvalidThreshold);
+            return Err(Error::InvalidThreshold);
         }
-
-        // Require current multi-sig quorum.
-        storage::require_multisig(&env, &signers)?;
 
         storage::set_admin_list_raw(&env, &new_admins, new_threshold);
         Ok(())
@@ -84,10 +82,9 @@ impl Contract {
     /// The current admin must authorise this call. The new admin becomes the
     /// sole admin with threshold = 1, ready to be promoted to a full multisig
     /// via `set_admins` if desired.
-    pub fn transfer_admin(env: Env, new_admin: Address) -> Result<(), ContractError> {
-        let previous_admin = storage::get_admin(&env);
-        previous_admin.require_auth();
-
+    /// Internal helper for transfer_admin.
+    fn transfer_admin_internal(env: Env, new_admin: Address) -> Result<(), Error> {
+        let previous_admin = storage::try_get_admin(&env)?;
         storage::set_admin(&env, &new_admin);
 
         env.events().publish(
@@ -98,8 +95,13 @@ impl Contract {
                 timestamp: env.ledger().timestamp(),
             },
         );
-
         Ok(())
+    }
+
+    pub fn transfer_admin(env: Env, new_admin: Address) -> Result<(), Error> {
+        let admin = storage::try_get_admin(&env)?;
+        admin.require_auth();
+        Self::transfer_admin_internal(env, new_admin)
     }
 
     // ----------------------------------------------------------------
@@ -112,10 +114,15 @@ impl Contract {
     }
 
     /// Override the minimum for a specific asset. Admin-only.
-    pub fn set_min_value(env: Env, asset: Address, min: i128) -> Result<(), ContractError> {
-        storage::get_admin(&env).require_auth();
+    /// Internal helper for set_min_value.
+    fn set_min_value_internal(env: Env, asset: Address, min: i128) -> Result<(), Error> {
         storage::set_min_value(&env, &asset, min);
         Ok(())
+    }
+
+    pub fn set_min_value(env: Env, asset: Address, min: i128) -> Result<(), Error> {
+        storage::try_get_admin(&env)?.require_auth();
+        Self::set_min_value_internal(env, asset, min)
     }
 
     // ----------------------------------------------------------------
@@ -127,7 +134,7 @@ impl Contract {
         v1_contract: Address,
         v1_stream_id: u64,
         caller: Address,
-    ) -> Result<u64, ContractError> {
+    ) -> Result<u64, Error> {
         Self::require_not_paused(&env)?;
         caller.require_auth();
 
@@ -135,20 +142,20 @@ impl Contract {
 
         let v1_stream = v1_client
             .try_get_stream(&v1_stream_id)
-            .map_err(|_| ContractError::NotStreamOwner)?
-            .map_err(|_| ContractError::NotStreamOwner)?;
+            .map_err(|_| Error::NotStreamOwner)?
+            .map_err(|_| Error::NotStreamOwner)?;
 
         if v1_stream.receiver != caller {
-            return Err(ContractError::NotStreamOwner);
+            return Err(Error::NotStreamOwner);
         }
 
         if v1_stream.cancelled || v1_stream.is_frozen || v1_stream.is_paused {
-            return Err(ContractError::StreamNotMigratable);
+            return Err(Error::StreamNotMigratable);
         }
 
         let now = env.ledger().timestamp();
         if now >= v1_stream.end_time {
-            return Err(ContractError::StreamNotMigratable);
+            return Err(Error::StreamNotMigratable);
         }
 
         let elapsed = {
@@ -164,19 +171,20 @@ impl Contract {
         let remaining = v1_stream.total_amount - unlocked;
 
         if remaining <= 0 {
-            return Err(ContractError::NothingToMigrate);
+            return Err(Error::NothingToMigrate);
         }
 
         v1_client
             .try_cancel(&v1_stream_id, &caller)
-            .map_err(|_| ContractError::StreamNotMigratable)?
-            .map_err(|_| ContractError::StreamNotMigratable)?;
+            .map_err(|_| Error::StreamNotMigratable)?
+            .map_err(|_| Error::StreamNotMigratable)?;
 
         let v2_stream_id = storage::next_stream_id(&env);
 
         let v2_stream = StreamV2 {
             sender: v1_stream.sender.clone(),
             receiver: caller.clone(),
+            beneficiary: caller.clone(), // Initial beneficiary is the receiver
             token: v1_stream.token.clone(),
             total_amount: remaining,
             start_time: now,
@@ -188,7 +196,7 @@ impl Contract {
             v1_stream_id,
             step_duration: 0,
             multiplier_bps: 0,
-            vault_address: None, // Migrated streams don't use V2 vaults
+            vault_address: None,
             yield_enabled: false,
             is_pending: false,
         };
@@ -228,19 +236,19 @@ impl Contract {
     // Stream Operations (Issue #363 — Escalating Rates)
     // ----------------------------------------------------------------
 
-    pub fn withdraw(env: Env, stream_id: u64, receiver: Address) -> Result<i128, ContractError> {
+    pub fn withdraw(env: Env, stream_id: u64, beneficiary: Address) -> Result<i128, Error> {
         Self::require_not_paused(&env)?;
-        receiver.require_auth();
+        beneficiary.require_auth();
 
         let mut stream =
-            storage::get_stream(&env, stream_id).ok_or(ContractError::StreamNotFound)?;
+            storage::get_stream(&env, stream_id).ok_or(Error::StreamNotFound)?;
 
-        if stream.receiver != receiver {
-            return Err(ContractError::NotStreamOwner);
+        if stream.beneficiary != beneficiary {
+            return Err(Error::NotBeneficiary);
         }
 
         if stream.cancelled {
-            return Err(ContractError::AlreadyCancelled);
+            return Err(Error::AlreadyCancelled);
         }
 
         let now = env.ledger().timestamp();
@@ -248,7 +256,7 @@ impl Contract {
         let to_withdraw = unlocked.saturating_sub(stream.withdrawn_amount);
 
         if to_withdraw <= 0 {
-            return Err(ContractError::NothingToMigrate); // TODO: Add NothingToWithdraw
+            return Err(Error::NothingToWithdraw);
         }
 
         // If Yield-Bearing, withdraw principal from Vault
@@ -272,7 +280,7 @@ impl Contract {
         let token_client = soroban_sdk::token::TokenClient::new(&env, &stream.token);
         token_client.transfer(
             &env.current_contract_address(),
-            &stream.receiver,
+            &stream.beneficiary,
             &to_withdraw,
         );
 
@@ -285,10 +293,10 @@ impl Contract {
         storage::update_stats(&env, -to_withdraw, &stream.sender, &stream.receiver);
 
         env.events().publish(
-            (symbol_short!("claim"), receiver.clone()),
+            (symbol_short!("claim"), beneficiary.clone()),
             StreamClaimV2Event {
                 stream_id,
-                receiver: receiver.clone(),
+                receiver: beneficiary.clone(),
                 amount: to_withdraw,
                 total_claimed: stream.withdrawn_amount,
                 timestamp: now,
@@ -298,19 +306,19 @@ impl Contract {
         Ok(to_withdraw)
     }
 
-    pub fn cancel(env: Env, stream_id: u64, caller: Address) -> Result<(), ContractError> {
+    pub fn cancel(env: Env, stream_id: u64, caller: Address) -> Result<(), Error> {
         Self::require_not_paused(&env)?;
         caller.require_auth();
 
         let mut stream =
-            storage::get_stream(&env, stream_id).ok_or(ContractError::StreamNotFound)?;
+            storage::get_stream(&env, stream_id).ok_or(Error::StreamNotFound)?;
 
-        if stream.sender != caller && stream.receiver != caller {
-            return Err(ContractError::NotStreamOwner);
+        if stream.sender != caller && stream.beneficiary != caller {
+            return Err(Error::NotStreamOwner);
         }
 
         if stream.cancelled {
-            return Err(ContractError::AlreadyCancelled);
+            return Err(Error::AlreadyCancelled);
         }
 
         let now = env.ledger().timestamp();
@@ -328,7 +336,7 @@ impl Contract {
                 if result.is_err() {
                     stream.is_pending = true;
                     storage::set_stream(&env, stream_id, &stream);
-                    return Err(ContractError::VaultPaused);
+                    return Err(Error::VaultPaused);
                 }
             }
         }
@@ -341,7 +349,7 @@ impl Contract {
         if to_receiver > 0 {
             token_client.transfer(
                 &env.current_contract_address(),
-                &stream.receiver,
+                &stream.beneficiary,
                 &to_receiver,
             );
         }
@@ -357,6 +365,36 @@ impl Contract {
                 to_receiver,
                 to_sender,
                 timestamp: now,
+            },
+        );
+
+        Ok(())
+    }
+
+    pub fn transfer_beneficiary(
+        env: Env,
+        stream_id: u64,
+        new_beneficiary: Address,
+    ) -> Result<(), Error> {
+        Self::require_not_paused(&env)?;
+
+        let mut stream =
+            storage::get_stream(&env, stream_id).ok_or(Error::StreamNotFound)?;
+
+        stream.beneficiary.require_auth();
+
+        let previous_beneficiary = stream.beneficiary.clone();
+        stream.beneficiary = new_beneficiary.clone();
+
+        storage::set_stream(&env, stream_id, &stream);
+
+        env.events().publish(
+            (symbol_short!("benefic"), stream_id),
+            BeneficiaryTransferredV2Event {
+                stream_id,
+                previous_beneficiary,
+                new_beneficiary,
+                timestamp: env.ledger().timestamp(),
             },
         );
 
@@ -426,23 +464,23 @@ impl Contract {
         res
     }
 
-    pub fn top_up(env: Env, stream_id: u64, sender: Address, extra_amount: i128) -> Result<(), ContractError> {
+    pub fn top_up(env: Env, stream_id: u64, sender: Address, extra_amount: i128) -> Result<(), Error> {
         Self::require_not_paused(&env)?;
         sender.require_auth();
 
         if extra_amount <= 0 {
-            return Err(ContractError::BelowDustThreshold);
+            return Err(Error::BelowDustThreshold);
         }
 
         let mut stream =
-            storage::get_stream(&env, stream_id).ok_or(ContractError::StreamNotFound)?;
+            storage::get_stream(&env, stream_id).ok_or(Error::StreamNotFound)?;
 
         if stream.sender != sender {
-            return Err(ContractError::NotStreamOwner);
+            return Err(Error::NotStreamOwner);
         }
 
         if stream.cancelled {
-            return Err(ContractError::AlreadyCancelled);
+            return Err(Error::AlreadyCancelled);
         }
 
         let now = env.ledger().timestamp();
@@ -499,32 +537,25 @@ impl Contract {
 
     /// Calculate the total value currently locked in active streams for a user.
     /// This represents the user's "skin in the game" for governance purposes.
-    ///
-    /// Returns the sum of (total_amount - withdrawn_amount) for all non-cancelled
-    /// streams where the user is either sender or receiver.
     pub fn get_active_volume(env: Env, user: Address) -> i128 {
         let total_streams = storage::get_health(&env).total_v2_streams;
         let mut total_locked: i128 = 0;
 
         for i in 0..total_streams {
             if let Some(stream) = storage::get_stream(&env, i) {
-                // Only count active (non-cancelled) streams
                 if !stream.cancelled {
-                    // Check if user is involved in this stream
                     if stream.sender == user || stream.receiver == user {
-                        // Calculate remaining locked amount
                         let locked = stream.total_amount.saturating_sub(stream.withdrawn_amount);
                         total_locked = total_locked.saturating_add(locked);
                     }
                 }
             }
         }
-
         total_locked
     }
 
-    pub fn pause(env: Env) -> Result<(), ContractError> {
-        let admin = storage::get_admin(&env);
+    pub fn pause(env: Env) -> Result<(), Error> {
+        let admin = storage::try_get_admin(&env)?;
         admin.require_auth();
         storage::set_paused(&env, true);
         env.events().publish(
@@ -537,8 +568,8 @@ impl Contract {
         Ok(())
     }
 
-    pub fn unpause(env: Env) -> Result<(), ContractError> {
-        let admin = storage::get_admin(&env);
+    pub fn unpause(env: Env) -> Result<(), Error> {
+        let admin = storage::try_get_admin(&env)?;
         admin.require_auth();
         storage::set_paused(&env, false);
         env.events().publish(
@@ -561,7 +592,6 @@ impl Contract {
 
     /// Compare the actual token balance in the contract with the sum of all
     /// active stream remaining balances.
-    /// Returns (contract_balance, total_remaining_in_streams).
     pub fn check_balance_integrity(env: Env, token: Address) -> (i128, i128) {
         let total_streams = storage::get_health(&env).total_v2_streams;
         let mut sum_remaining: i128 = 0;
@@ -577,34 +607,27 @@ impl Contract {
 
         let token_client = soroban_sdk::token::TokenClient::new(&env, &token);
         let contract_balance = token_client.balance(&env.current_contract_address());
-
         (contract_balance, sum_remaining)
     }
 
     /// Proportionally reduce all active streams for a token if the contract
-    /// balance is less than the total committed amount (e.g. after a clawback).
-    /// Only the contract admin can trigger this.
-    pub fn rebalance_after_clawback(env: Env, token: Address) -> Result<(), ContractError> {
-        let admin = storage::get_admin(&env);
+    /// balance is less than the total committed amount.
+    pub fn rebalance_after_clawback(env: Env, token: Address) -> Result<(), Error> {
+        let admin = storage::try_get_admin(&env)?;
         admin.require_auth();
 
         let (balance, sum_remaining) = Self::check_balance_integrity(env.clone(), token.clone());
-
         if balance >= sum_remaining || sum_remaining == 0 {
             return Ok(());
         }
 
-        // reduction_factor_bps = (balance * 10000) / sum_remaining
         let reduction_factor_bps = (balance * 10000) / sum_remaining;
-
         let total_streams = storage::get_health(&env).total_v2_streams;
         for i in 0..total_streams {
             if let Some(mut stream) = storage::get_stream(&env, i) {
                 if !stream.cancelled && stream.token == token {
                     let old_remaining = stream.total_amount.saturating_sub(stream.withdrawn_amount);
                     let new_remaining = (old_remaining * reduction_factor_bps) / 10000;
-                    
-                    // New total = withdrawn + new_remaining
                     stream.total_amount = stream.withdrawn_amount + new_remaining;
                     storage::set_stream(&env, i, &stream);
                 }
@@ -613,7 +636,7 @@ impl Contract {
 
         env.events().publish(
             (symbol_short!("rebalance"), token.clone()),
-            types::ClawbackRebalanceEvent {
+            ClawbackRebalanceEvent {
                 token,
                 total_remaining: sum_remaining,
                 contract_balance: balance,
@@ -625,14 +648,14 @@ impl Contract {
         Ok(())
     }
 
-    fn require_not_paused(env: &Env) -> Result<(), ContractError> {
+    fn require_not_paused(env: &Env) -> Result<(), Error> {
         if storage::is_paused(env) {
-            return Err(ContractError::ContractPaused);
+            return Err(Error::ContractPaused);
         }
         Ok(())
     }
 
-    pub fn create_stream(env: Env, args: StreamArgs) -> Result<u64, ContractError> {
+    pub fn create_stream(env: Env, args: StreamArgs) -> Result<u64, Error> {
         Self::require_not_paused(&env)?;
         args.sender.require_auth();
 
@@ -640,11 +663,11 @@ impl Contract {
             || args.cliff_time < args.start_time
             || args.cliff_time > args.end_time
         {
-            return Err(ContractError::InvalidTimeRange);
+            return Err(Error::InvalidTimeRange);
         }
 
         if args.total_amount < storage::get_min_value(&env, &args.token) {
-            return Err(ContractError::BelowDustThreshold);
+            return Err(Error::BelowDustThreshold);
         }
 
         let token_client = soroban_sdk::token::TokenClient::new(&env, &args.token);
@@ -668,6 +691,7 @@ impl Contract {
         let stream = StreamV2 {
             sender: args.sender.clone(),
             receiver: args.receiver.clone(),
+            beneficiary: args.receiver.clone(),
             token: args.token.clone(),
             total_amount: args.total_amount,
             start_time: args.start_time,
@@ -709,23 +733,23 @@ impl Contract {
         env: Env,
         args: PermitArgs,
         signature: soroban_sdk::BytesN<64>,
-    ) -> Result<u64, ContractError> {
+    ) -> Result<u64, Error> {
         Self::require_not_paused(&env)?;
         let now = env.ledger().timestamp();
 
         if now > args.deadline {
-            return Err(ContractError::ExpiredDeadline);
+            return Err(Error::ExpiredDeadline);
         }
 
         if args.total_amount < storage::get_min_value(&env, &args.token) {
-            return Err(ContractError::BelowDustThreshold);
+            return Err(Error::BelowDustThreshold);
         }
 
         let nonce_key = (symbol_short!("NONCE"), args.sender_pubkey.clone());
         let stored_nonce: u64 = env.storage().instance().get(&nonce_key).unwrap_or(0u64);
 
         if args.nonce != stored_nonce {
-            return Err(ContractError::InvalidNonce);
+            return Err(Error::InvalidNonce);
         }
 
         let mut msg = soroban_sdk::Bytes::new(&env);
@@ -770,6 +794,7 @@ impl Contract {
         let stream = StreamV2 {
             sender: sender_addr.clone(),
             receiver: args.receiver.clone(),
+            beneficiary: args.receiver.clone(),
             token: args.token.clone(),
             total_amount: args.total_amount,
             start_time: args.start_time,
@@ -810,16 +835,16 @@ impl Contract {
     // Issue #367 — Batch Stream Creation
     // ----------------------------------------------------------------
 
-    pub fn create_batch_streams(env: Env, streams: Vec<StreamArgs>) -> Result<Vec<u64>, ContractError> {
+    pub fn create_batch_streams(env: Env, streams: Vec<StreamArgs>) -> Result<Vec<u64>, Error> {
         Self::require_not_paused(&env)?;
 
         // Validate batch size limit (max 10 streams)
         if streams.len() > 10 {
-            return Err(ContractError::BatchTooLarge);
+            return Err(Error::BatchTooLarge);
         }
 
         if streams.is_empty() {
-            return Err(ContractError::InvalidTimeRange); // Reuse error for empty batch
+            return Err(Error::InvalidTimeRange); // Reuse error for empty batch
         }
 
         // Validate all streams upfront to ensure atomicity
@@ -829,7 +854,7 @@ impl Contract {
         for args in streams.iter() {
             // All streams must have the same sender
             if args.sender != sender {
-                return Err(ContractError::InvalidTimeRange); // Reuse error for inconsistent sender
+                return Err(Error::UnauthorizedSender); 
             }
 
             // Validate time ranges
@@ -837,16 +862,16 @@ impl Contract {
                 || args.cliff_time < args.start_time
                 || args.cliff_time > args.end_time
             {
-                return Err(ContractError::InvalidTimeRange);
+                return Err(Error::InvalidTimeRange);
             }
 
             // Validate dust threshold
             if args.total_amount < storage::get_min_value(&env, &args.token) {
-                return Err(ContractError::BelowDustThreshold);
+                return Err(Error::BelowDustThreshold);
             }
 
             total_amount = total_amount.checked_add(args.total_amount)
-                .ok_or(ContractError::InvalidTimeRange)?; // Overflow protection
+                .ok_or(Error::InvalidTimeRange)?; // Overflow protection
         }
 
         // Require auth from the sender
@@ -870,6 +895,7 @@ impl Contract {
             let stream = StreamV2 {
                 sender: args.sender.clone(),
                 receiver: args.receiver.clone(),
+                beneficiary: args.receiver.clone(),
                 token: args.token.clone(),
                 total_amount: args.total_amount,
                 start_time: args.start_time,
@@ -911,7 +937,7 @@ impl Contract {
 
         // Emit batch creation summary event
         env.events().publish(
-            (symbol_short!("batch_cr"), sender.clone()),
+            (Symbol::new(&env, "batch_create"), sender.clone()),
             BatchStreamsCreatedEvent {
                 stream_ids: stream_ids.clone(),
                 sender: sender.clone(),
@@ -922,6 +948,63 @@ impl Contract {
         );
 
         Ok(stream_ids)
+    }
+
+    // ----------------------------------------------------------------
+    // Time-locked Admin Operations
+    // ----------------------------------------------------------------
+
+    pub fn schedule_op(env: Env, op: Operation) -> Result<(), Error> {
+        let admin = storage::try_get_admin(&env)?;
+        admin.require_auth();
+
+        let execution_time = env.ledger().timestamp() + storage::ADMIN_DELAY;
+        storage::schedule_op(&env, &op, execution_time);
+
+        env.events().publish(
+            (symbol_short!("schedule"),),
+            OperationScheduledEvent {
+                op,
+                execution_time,
+            },
+        );
+
+        Ok(())
+    }
+
+    pub fn execute_op(env: Env, op: Operation) -> Result<(), Error> {
+        let admin = storage::try_get_admin(&env)?;
+        admin.require_auth();
+
+        let execution_time = storage::get_scheduled_op_time(&env, &op).ok_or(Error::OpNotScheduled)?;
+
+        if env.ledger().timestamp() < execution_time {
+            return Err(Error::NotExecutionTime);
+        }
+
+        // Execute the actual operation
+        match &op {
+            Operation::SetAdmins(new_admins, new_threshold) => {
+                Self::set_admins_internal(env.clone(), new_admins.clone(), *new_threshold)?;
+            }
+            Operation::TransferAdmin(new_admin) => {
+                Self::transfer_admin_internal(env.clone(), new_admin.clone())?;
+            }
+            Operation::SetMinValue(asset, min) => {
+                Self::set_min_value_internal(env.clone(), asset.clone(), *min)?;
+            }
+        }
+
+        storage::clear_op(&env, &op);
+
+        env.events().publish(
+            (symbol_short!("executed"),),
+            OperationExecutedEvent {
+                op,
+            },
+        );
+
+        Ok(())
     }
 }
 

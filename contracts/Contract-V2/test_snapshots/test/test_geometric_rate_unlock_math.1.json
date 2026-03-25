@@ -590,6 +590,14 @@
                   "map": [
                     {
                       "key": {
+                        "symbol": "beneficiary"
+                      },
+                      "val": {
+                        "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "cancelled"
                       },
                       "val": {
