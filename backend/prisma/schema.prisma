@@ -269,6 +269,27 @@ enum NotificationPlatform {
   telegram
 }
 
+// Invoice links for Nebula-Pay payment link generator
+model InvoiceLink {
+  id            String   @id @default(cuid())
+  slug          String   @unique // Short UUID for shareable URL
+  sender        String
+  receiver      String
+  amount        String   // Total amount to stream
+  tokenAddress  String
+  duration      Int      // Duration in seconds
+  description   String?  // Optional invoice description
+  pdfUrl        String?  // Optional PDF invoice URL
+  xdrParams     String   // Encoded XDR parameters for contract call
+  status        String   @default("DRAFT") // DRAFT, SIGNED, COMPLETED, EXPIRED
+  expiresAt     DateTime? // Optional expiration time
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([slug])
+  @@index([sender])
+  @@index([status])
+  @@index([createdAt])
 // Affiliate earnings tracker for 0.5% commission on stream creation
 model Affiliate {
   id             String   @id @default(cuid())
