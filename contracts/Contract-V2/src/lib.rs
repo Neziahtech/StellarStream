@@ -719,6 +719,29 @@ impl Contract {
         storage::get_health(&env)
     }
 
+    /// Predict the exact balance at a future timestamp for a given stream.
+    ///
+    /// This function is useful for "Stellar Glass" projection charts that need to
+    /// visualize future stream balances. It accounts for cliffs and exponential curves
+    /// defined in the stream configuration.
+    ///
+    /// # Parameters
+    /// - `stream_id`: The ID of the stream to predict
+    /// - `future_timestamp`: The future timestamp to predict the balance at
+    ///
+    /// # Returns
+    /// - `Ok(i128)`: The predicted unlocked balance at the future timestamp
+    /// - `Err(Error::StreamNotFound)`: If the stream does not exist
+    ///
+    /// # Example
+    /// ```ignore
+    /// let predicted = contract.predict_balance_at(&env, &stream_id, &future_time)?;
+    /// ```
+    pub fn predict_balance_at(env: Env, stream_id: u64, future_timestamp: u64) -> Result<i128, Error> {
+        let stream = storage::get_stream(&env, stream_id).ok_or(Error::StreamNotFound)?;
+        Ok(Self::calculate_unlocked_internal(&stream, future_timestamp))
+    }
+
     // ----------------------------------------------------------------
     // Stream Operations (Issue #363 — Escalating Rates)
     // ----------------------------------------------------------------
